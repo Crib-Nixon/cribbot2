@@ -7,7 +7,22 @@ from aiohttp import web
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 HF_TOKEN = os.getenv("HF_TOKEN")
-HF_MODEL = os.getenv("HF_MODEL", "HuggingFaceH4/zephyr-7b-beta")
+
+# Get HF model name, with extra safety fallback
+raw_model_env = os.getenv("HF_MODEL", "").strip()
+if not raw_model_env:
+    HF_MODEL = "HuggingFaceH4/zephyr-7b-beta"
+else:
+    HF_MODEL = raw_model_env
+
+HF_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+
+# Debug logging
+print(f"[DEBUG] HF_MODEL env raw: {raw_model_env!r}")
+print(f"[DEBUG] HF_MODEL used: {HF_MODEL!r}")
+print(f"[DEBUG] HF_URL: {HF_URL}")
+
+
 PORT = int(os.getenv("PORT", "8080"))
 
 if not DISCORD_TOKEN or not HF_TOKEN:
