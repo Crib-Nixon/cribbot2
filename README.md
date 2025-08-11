@@ -1,3 +1,2 @@
-This build includes robust HF model fallback and audioop-lts for Python 3.13.
-If HF API returns 404, the bot will auto-try alternate public models.
-Set env vars in Render: DISCORD_TOKEN, HF_TOKEN (and optional HF_MODEL).
+Hardened HF handling: trims env, validates token prefix, logs model/URL, and tries public fallbacks.
+Env needed: DISCORD_TOKEN, HF_TOKEN (and optional HF_MODEL). Keep secrets in Render env vars.
