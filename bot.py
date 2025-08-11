@@ -106,9 +106,6 @@ async def on_message(message: discord.Message):
         content = re.sub(fr"<@!?{bot.user.id}>", "", message.content).strip()
         if not content:
             return
-        if not is_clean(content):
-            await message.reply("Nope. Try something else.")
-            return
         try:
             reply = await generate_reply(message.guild.id, content)
             await message.reply(reply or "…processing…")
