@@ -1,35 +1,46 @@
-import os, re, time, asyncio
-from typing import Dict
+
+import os, re, time, asyncio, sys
+from typing import Dict, List
 import aiohttp
 import discord
 from discord.ext import commands
 from aiohttp import web
 
+print("Python:", sys.version)
+try:
+    import audioop  # provided by audioop-lts on Python 3.13
+    print("audioop module loaded OK")
+except Exception as e:
+    print("audioop import error:", e)
+
+# ---- Env ----
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 HF_TOKEN = os.getenv("HF_TOKEN")
+raw_model_env = os.getenv("HF_MODEL", "")
 
-# Get HF model name, with extra safety fallback
-raw_model_env = os.getenv("HF_MODEL", "").strip()
-if not raw_model_env:
-    HF_MODEL = "HuggingFaceH4/zephyr-7b-beta"
-else:
-    HF_MODEL = raw_model_env
+# Harden parsing: strip spaces and quotes
+def _clean(s: str) -> str:
+    if s is None: return ""
+    return s.strip().strip('"').strip("'")
 
-HF_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
-
-# Debug logging
-print(f"[DEBUG] HF_MODEL env raw: {raw_model_env!r}")
-print(f"[DEBUG] HF_MODEL used: {HF_MODEL!r}")
-print(f"[DEBUG] HF_URL: {HF_URL}")
-
+raw_model_env = _clean(raw_model_env)
+HF_MODEL = raw_model_env or "HuggingFaceH4/zephyr-7b-beta"
 
 PORT = int(os.getenv("PORT", "8080"))
 
 if not DISCORD_TOKEN or not HF_TOKEN:
     raise SystemExit("Set DISCORD_TOKEN and HF_TOKEN as environment variables.")
 
-HF_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+def hf_url_for(model: str) -> str:
+    return f"https://api-inference.huggingface.co/models/{model}"
 
+HF_URL = hf_url_for(HF_MODEL)
+
+print(f"[DEBUG] HF_MODEL env raw: {os.getenv('HF_MODEL')!r}")
+print(f"[DEBUG] HF_MODEL used: {HF_MODEL!r}")
+print(f"[DEBUG] HF_URL: {HF_URL}")
+
+# ---- Discord setup ----
 INTENTS = discord.Intents.default()
 INTENTS.message_content = True
 bot = commands.Bot(command_prefix="!", intents=INTENTS)
@@ -54,8 +65,22 @@ def build_prompt(user_text: str) -> str:
 
 
 
-async def hf_generate(prompt: str, max_new_tokens: int = 220, temperature: float = 0.9, top_p: float = 0.9) -> str:
-    headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
+
+# ---- HF Inference (with fallback list) ----
+FALLBACK_MODELS: List[str] = [
+    "HuggingFaceH4/zephyr-7b-beta",
+    "mistralai/Mistral-7B-Instruct-v0.2",
+    "google/gemma-2b-it",
+    "meta-llama/Llama-3.2-1B-Instruct",
+]
+
+async def hf_generate_with_model(model: str, prompt: str, max_new_tokens: int = 220, temperature: float = 0.9, top_p: float = 0.9) -> str:
+    url = hf_url_for(model)
+    headers = {
+        "Authorization": f"Bearer {HF_TOKEN}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
     payload = {
         "inputs": prompt,
         "parameters": {
@@ -67,19 +92,43 @@ async def hf_generate(prompt: str, max_new_tokens: int = 220, temperature: float
     }
     timeout = aiohttp.ClientTimeout(total=75)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(HF_URL, headers=headers, json=payload) as resp:
+        async with session.post(url, headers=headers, json=payload) as resp:
+            text = await resp.text()
             if resp.status != 200:
-                text = await resp.text()
-                raise RuntimeError(f"HF API error {resp.status}: {text}")
-            data = await resp.json()
+                raise RuntimeError(f"HF API error {resp.status} for {model}: {text[:400]}")
+            try:
+                data = await resp.json()
+            except Exception:
+                raise RuntimeError(f"HF JSON parse error for {model}: {text[:400]}")
             if isinstance(data, list) and data and "generated_text" in data[0]:
                 return data[0]["generated_text"].strip()
             if isinstance(data, dict) and "generated_text" in data:
                 return data["generated_text"].strip()
             if isinstance(data, dict) and "error" in data:
-                return f"[model cold start/queue] {data['error']}"
+                return f"[model/queue] {data['error']}"
             return str(data)[:1000]
 
+async def hf_generate(prompt: str) -> str:
+    # Try requested model first, then fallbacks
+    models = [HF_MODEL] + [m for m in FALLBACK_MODELS if m != HF_MODEL]
+    last_err = None
+    for m in models:
+        try:
+            print(f"[DEBUG] Trying HF model: {m}")
+            return await hf_generate_with_model(m, prompt)
+        except RuntimeError as e:
+            err = str(e)
+            print(f"[WARN] HF call failed for {m}: {err}")
+            last_err = err
+            # Only fall through on 404/5xx; on 401/403 it's a token/permission issue
+            if " 404 " not in err and " 5" not in err[:10]:
+                break
+        except Exception as e:
+            last_err = repr(e)
+            print(f"[WARN] Unexpected HF error for {m}: {e!r}")
+    raise RuntimeError(last_err or "Unknown HF error")
+
+# ---- Rate limiting (per guild) ----
 LAST_TS: Dict[int, float] = {}
 COOLDOWN = 3.5
 
@@ -94,15 +143,12 @@ def on_cooldown(guild_id: int) -> bool:
 async def generate_reply(guild_id: int, user_text: str) -> str:
     prompt = build_prompt(user_text)
     raw = await hf_generate(prompt)
-    return raw
+    return sanitize(raw)
 
 @bot.tree.command(name="ask", description="Ask the bot something (edgy-but-clean)")
 async def ask_cmd(interaction: discord.Interaction, prompt: str):
     if on_cooldown(interaction.guild_id):
         await interaction.response.send_message("Whoa—pace yourself ⏳", ephemeral=True)
-        return
-    if not is_clean(prompt):
-        await interaction.response.send_message("Nah, not going there.", ephemeral=True)
         return
     await interaction.response.defer(thinking=True)
     try:

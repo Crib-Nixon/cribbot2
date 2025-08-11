@@ -1,15 +1,8 @@
-# Python
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
 .venv/
 venv/
 .env
-
-# OS
 .DS_Store
-
-# Never commit secrets
 *.secret
 .env.*
