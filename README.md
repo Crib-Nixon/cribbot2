@@ -1,19 +1,24 @@
-# Discord Edgy Bot — Complete (Render-ready)
+# Discord Edgy Bot — Groq (Name Trigger Only)
 
-- Hardened env parsing (`DISCORD_TOKEN`, `HF_TOKEN`, optional `HF_MODEL`)
-- Logs model/URL on boot
-- `/health` and `/hfcheck` endpoints
-- HF API fallbacks for common public models
-- `audioop-lts` for Python 3.13
+- No slash commands. No @mention required.
+- The bot replies when its **name** appears in a message (case-insensitive), using word-boundary match to avoid false positives.
+- Includes `/health` and `/llmcheck` endpoints for diagnostics.
+- Uses Groq's OpenAI-compatible API (free-friendly).
 
-## Deploy on Render
+## Render setup
 - Build: `pip install -r requirements.txt`
 - Start: `python bot.py`
 - Env:
-  - `DISCORD_TOKEN` (no quotes)
-  - `HF_TOKEN` (starts with `hf_`)
-  - Optional `HF_MODEL` (default `HuggingFaceH4/zephyr-7b-beta`)
+  - `DISCORD_TOKEN`  (no quotes)
+  - `GROQ_API_KEY`   (from https://console.groq.com/keys)
+  - optional `GROQ_MODEL` (defaults to `llama-3.1-8b-instant`)
 
-Open:
-- `https://<your-app>.onrender.com/health` → `ok`
-- `https://<your-app>.onrender.com/hfcheck` → JSON with HF status
+## Use
+- Rename your bot in Discord to a unique name (e.g., "CribBot").
+- The bot will reply whenever someone includes that name in their message, e.g.:
+  - `cribbot roast my cable management`
+  - `hey CribBot, rate this setup`
+
+## Notes
+- The bot strips its own name from the message before sending to the LLM.
+- Safety filters avoid explicit hate/violence; keep things edgy-but-clean.

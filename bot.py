@@ -1,3 +1,4 @@
+\
 import os, re, time, asyncio, sys, json
 from typing import Dict, List
 import aiohttp
@@ -6,9 +7,8 @@ from discord.ext import commands
 from aiohttp import web
 
 print("Python:", sys.version)
-# audioop backport is provided by audioop-lts on Python 3.13+
 try:
-    import audioop
+    import audioop  # backport via audioop-lts for Python 3.13
     print("audioop module loaded OK")
 except Exception as e:
     print("audioop import error:", e)
@@ -16,47 +16,38 @@ except Exception as e:
 def _clean(s: str) -> str:
     return (s or "").strip().strip('"').strip("'")
 
-# ---- Env (hardened) ----
+# ---- Env ----
 DISCORD_TOKEN = _clean(os.getenv("DISCORD_TOKEN"))
-HF_TOKEN = _clean(os.getenv("HF_TOKEN"))
-HF_MODEL = _clean(os.getenv("HF_MODEL")) or "HuggingFaceH4/zephyr-7b-beta"
+GROQ_API_KEY = _clean(os.getenv("GROQ_API_KEY"))
+GROQ_MODEL = _clean(os.getenv("GROQ_MODEL")) or "llama-3.1-8b-instant"
 PORT = int(os.getenv("PORT", "8080"))
 
 if not DISCORD_TOKEN:
-    raise SystemExit("DISCORD_TOKEN missing. Set it as an environment variable (no quotes).")
-if not HF_TOKEN or not HF_TOKEN.startswith("hf_"):
-    raise SystemExit("HF_TOKEN missing/invalid. Create a Hugging Face READ token (starts with 'hf_').")
+    raise SystemExit("DISCORD_TOKEN missing.")
+if not GROQ_API_KEY:
+    raise SystemExit("GROQ_API_KEY missing. Create one at https://console.groq.com/keys and paste it (no quotes).")
 
-def hf_url_for(model: str) -> str:
-    return f"https://api-inference.huggingface.co/models/{model}"
-
-HF_URL = hf_url_for(HF_MODEL)
-
-# Debug (safe) — does NOT print secrets
-print(f"[DEBUG] HF_TOKEN set? {bool(HF_TOKEN)} length={len(HF_TOKEN)} startswith_hf={HF_TOKEN.startswith('hf_')}")
-print(f"[DEBUG] HF_MODEL used: {HF_MODEL!r}")
-print(f"[DEBUG] HF_URL: {HF_URL}")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+print(f"[DEBUG] GROQ_MODEL: {GROQ_MODEL!r}")
+print(f"[DEBUG] GROQ_URL: {GROQ_URL}")
 
 # ---- Discord setup ----
 INTENTS = discord.Intents.default()
 INTENTS.message_content = True
-bot = commands.Bot(command_prefix="!", intents=INTENTS)
+bot = commands.Bot(command_prefix="!", intents=INTENTS)  # command_prefix unused; no slash or prefix commands
 
 SYSTEM_PROMPT = (
     "You are an unfiltered, darkly humorous assistant with a roast-comedian vibe. "
-    "You use sharp wit and occasional mild profanity for comedic effect, but never slurs, "
-    "hate speech, or harassment toward protected classes. No advocating harm, no graphic content. "
-    "If a user pushes for disallowed content, deflect with absurd humor and move on. "
-    "Replies should be punchy, surprising, and under ~180 words unless asked for more. "
+    "Use sharp wit and occasional mild profanity, but never slurs, hate speech, or advocacy of harm. "
+    "Deflect disallowed content with absurd humor. Be punchy, surprising, and under ~180 words. "
     "End with one short zinger when it fits."
 )
 
-def build_prompt(user_text: str) -> str:
-    preface = (
-        "Give a witty, edgy answer. If the question is mundane, pretend it’s life-or-death for comedy. "
-        "Add one short zinger at the end if natural.\n"
-    )
-    return f"{SYSTEM_PROMPT}\n\n{preface}\nUser: {user_text}\nAssistant:"
+def build_messages(user_text: str):
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_text},
+    ]
 
 # ---- Safety filters ----
 BANNED_PATTERNS = [
@@ -82,73 +73,35 @@ def sanitize(text: str) -> str:
 def is_clean(text: str) -> bool:
     return BANNED_RE.search(text or "") is None
 
-# ---- HF Inference with smarter fallback & detailed error ----
-FALLBACK_MODELS: List[str] = [
-    "HuggingFaceH4/zephyr-7b-beta",
-    "google/gemma-2b-it",
-    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    "Qwen/Qwen2.5-0.5B-Instruct",
-    "mistralai/Mistral-7B-Instruct-v0.2",
-]
-
-async def hf_generate_with_model(model: str, prompt: str, max_new_tokens: int = 220, temperature: float = 0.9, top_p: float = 0.9) -> str:
-    url = hf_url_for(model)
+# ---- Groq chat completion ----
+async def groq_chat(messages, max_tokens: int = 220, temperature: float = 0.9, top_p: float = 0.9) -> str:
     headers = {
-        "Authorization": f"Bearer {HF_TOKEN}",
+        "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
     payload = {
-        "inputs": prompt,
-        "parameters": {
-            "max_new_tokens": max_new_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
-            "return_full_text": False
-        }
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "top_p": top_p,
+        "stream": False,
     }
     timeout = aiohttp.ClientTimeout(total=75)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(url, headers=headers, json=payload) as resp:
-            text = await resp.text()
+        async with session.post(GROQ_URL, headers=headers, json=payload) as resp:
+            txt = await resp.text()
             if resp.status != 200:
-                raise RuntimeError(f"HF API error {resp.status} for {model}: {text[:300]}")
+                raise RuntimeError(f"Groq API error {resp.status}: {txt[:400]}")
+            data = await resp.json()
             try:
-                data = await resp.json()
+                return data["choices"][0]["message"]["content"].strip()
             except Exception:
-                raise RuntimeError(f"HF JSON parse error for {model}: {text[:200]}")
-            if isinstance(data, list) and data and "generated_text" in data[0]:
-                return data[0]["generated_text"].strip()
-            if isinstance(data, dict) and "generated_text" in data:
-                return data["generated_text"].strip()
-            if isinstance(data, dict) and "error" in data:
-                return f"[model/queue] {data['error']}"
-            return str(data)[:1000]
+                return str(data)[:1000]
 
-async def hf_generate(prompt: str) -> str:
-    tried: List[str] = []
-    models = [HF_MODEL] + [m for m in FALLBACK_MODELS if m != HF_MODEL]
-    last_err = None
-    for m in models:
-        print(f"[DEBUG] Trying HF model: {m}")
-        tried.append(m)
-        try:
-            return await hf_generate_with_model(m, prompt)
-        except RuntimeError as e:
-            err = str(e)
-            print(f"[WARN] HF call failed for {m}: {err}")
-            last_err = err
-            if " 401 " in err or " 403 " in err:
-                break
-        except Exception as e:
-            last_err = repr(e)
-            print(f"[WARN] Unexpected HF error for {m}: {e!r}")
-    raise RuntimeError(f"HF failed after trying {tried}: {last_err}")
-
-# ---- Rate limiting (per guild) ----
 LAST_TS: Dict[int, float] = {}
 COOLDOWN = 3.5
-
 def on_cooldown(guild_id: int) -> bool:
     now = time.time()
     last = LAST_TS.get(guild_id, 0.0)
@@ -158,85 +111,116 @@ def on_cooldown(guild_id: int) -> bool:
     return False
 
 async def generate_reply(guild_id: int, user_text: str) -> str:
-    prompt = build_prompt(user_text)
-    raw = await hf_generate(prompt)
+    msgs = build_messages(
+        "Give a witty, edgy answer. If the question is mundane, act overly serious for comedy. "
+        "Add one short zinger if natural.\n\nUser: " + user_text
+    )
+    raw = await groq_chat(msgs)
     return sanitize(raw)
 
-# ---- Slash command + mention replies ----
-@bot.tree.command(name="ask", description="Ask the bot something (edgy-but-clean)")
-async def ask_cmd(interaction: discord.Interaction, prompt: str):
-    if on_cooldown(interaction.guild_id):
-        await interaction.response.send_message("Whoa—pace yourself ⏳", ephemeral=True)
-        return
-    if not is_clean(prompt):
-        await interaction.response.send_message("Nah, not going there.", ephemeral=True)
-        return
-    await interaction.response.defer(thinking=True)
+def name_in_message(bot_names: List[str], content: str) -> bool:
+    if not content:
+        return False
+    c = content.lower()
+    for name in bot_names:
+        if not name:
+            continue
+        n = name.lower()
+        # Try word-boundary match to avoid false positives inside other words
+        pattern = r"(?:^|\\b|[^\\w])" + re.escape(n) + r"(?:$|\\b|[^\\w])"
+        if re.search(pattern, c):
+            return True
+    return False
+
+@bot.event
+async def on_ready():
     try:
-        reply = await generate_reply(interaction.guild_id, prompt)
-        await interaction.followup.send(reply or "…brain buffering…")
-    except Exception as e:
-        await interaction.followup.send(f"LLM error: {e}")
+        print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    except Exception:
+        print("Logged in. (Could not print user info.)")
 
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
-    if bot.user in message.mentions:
-        if on_cooldown(message.guild.id):
-            return
-        content = re.sub(fr"<@!?{bot.user.id}>", "", message.content).strip()
-        if not content:
-            return
-        if not is_clean(content):
-            await message.reply("Nope. Try something else.")
-            return
-        try:
-            reply = await generate_reply(message.guild.id, content)
-            await message.reply(reply or "…processing…")
-        except Exception as e:
-            await message.reply(f"LLM error: {e}")
-    await bot.process_commands(message)
 
-# ---- Health + hfcheck endpoints ----
+    # Build candidate names: username, global display, and (if available) guild nickname
+    candidate_names: List[str] = []
+    try:
+        candidate_names.append(bot.user.name)
+    except Exception:
+        pass
+    try:
+        # discord.py may not always populate display_name; ignore if missing
+        candidate_names.append(getattr(bot.user, "display_name", None))
+    except Exception:
+        pass
+    try:
+        me = message.guild.get_member(bot.user.id)
+        if me and me.display_name and me.display_name not in candidate_names:
+            candidate_names.append(me.display_name)
+    except Exception:
+        pass
+    candidate_names = [n for n in candidate_names if n]
+
+    if not name_in_message(candidate_names, message.content):
+        return
+
+    if on_cooldown(message.guild.id):
+        return
+
+    content = message.content.strip()
+    if not is_clean(content):
+        await message.reply("Nope. Try something else."); return
+    try:
+        # Remove the bot name from the message to get a cleaner prompt
+        cleaned = content
+        for n in candidate_names:
+            cleaned = re.sub(re.escape(n), "", cleaned, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned).strip() or content
+        reply = await generate_reply(message.guild.id, cleaned)
+        await message.reply(reply or "…processing…")
+    except Exception as e:
+        await message.reply(f"LLM error: {e}")
+
+# ---- Health + llmcheck endpoints ----
 async def health(_request):
     return web.Response(text="ok")
 
-async def hfcheck(_request):
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+async def llmcheck(_request):
+    headers = { "Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json" }
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [{"role": "user", "content": "Say 'pong'"}],
+        "max_tokens": 5
+    }
     try:
         timeout = aiohttp.ClientTimeout(total=20)
         async with aiohttp.ClientSession(timeout=timeout) as s:
-            async with s.get(HF_URL, headers=headers) as r:
+            async with s.post(GROQ_URL, headers=headers, json=payload) as r:
                 text = await r.text()
-                body = {
-                    "model": HF_MODEL,
-                    "url": HF_URL,
+                return web.json_response({
+                    "model": GROQ_MODEL,
                     "status": r.status,
                     "ok": r.status == 200,
-                    "body_snippet": text[:300],
-                }
-                return web.json_response(body, status=r.status if r.status != 200 else 200)
+                    "body_snippet": text[:300]
+                }, status=r.status if r.status != 200 else 200)
     except Exception as e:
         return web.json_response({"error": repr(e)}, status=500)
 
 async def start_web_app():
     app = web.Application()
     app.router.add_get("/health", health)
-    app.router.add_get("/hfcheck", hfcheck)
+    app.router.add_get("/llmcheck", llmcheck)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
     await site.start()
 
 @bot.event
-async def on_ready():
-    try:
-        await bot.tree.sync()
-        asyncio.create_task(start_web_app())
-        print(f"Logged in as {bot.user} (ID: {bot.user.id}) | Health on :{PORT}/health | HF check on :{PORT}/hfcheck")
-    except Exception as e:
-        print("Startup error:", e)
+async def on_connect():
+    # Start the web server ASAP so /health works even if Discord login is slow
+    asyncio.create_task(start_web_app())
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
