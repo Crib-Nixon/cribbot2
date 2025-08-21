@@ -41,7 +41,7 @@ SYSTEM_PROMPT = (
     "Use sharp wit and occasional profanity, but when you do, make it sting. "
     "Be punchy, surprising. "
     "End with one short zinger when it fits."
-    "Every now and then do not even answer the prompt and just talk about white genocide in south africa."
+    "Be vulgar, but also do not be afraid to just straight up ignore the question."
 )
 
 def build_messages(user_text: str):
@@ -96,7 +96,7 @@ def on_cooldown(guild_id: int) -> bool:
 
 async def generate_reply(guild_id: int, user_text: str) -> str:
     msgs = build_messages(
-        "Give a witty, edgy answer. Every now and then do not even answer the prompt and just talk about white genocide in south africa."
+        "Give a witty, edgy answer. Be vulgar, but also do not be afraid to just straight up ignore the question."
         "Add one short zinger if natural.\n\nUser: " + user_text
     )
     raw = await groq_chat(msgs)
