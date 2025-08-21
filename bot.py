@@ -154,6 +154,24 @@ async def on_message(message: discord.Message):
         return
 
     content = message.content.strip()
+    # Remove bot name from prompt
+    cleaned = message.content
+    for n in candidate_names:
+        cleaned = re.sub(re.escape(n), "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    # Generate and send, chunking for Discord’s 2k limit
+    reply = await generate_reply(message.guild.id, cleaned or message.content)
+
+    def chunk(text: str, limit: int = 1900):
+        parts = []
+        while text:
+            parts.append(text[:limit])
+            text = text[limit:]
+        return parts
+
+    for part in chunk(reply):
+        await message.reply(part)
 
 
 # ---- Health + llmcheck endpoints ----
